@@ -624,32 +624,48 @@ modalWaveBtn.addEventListener('click', async () => {
 });
 
 // --- Live (WebSocket) event handlers ---------------------------------------
+const isResultsVisible = () => document.getElementById('results-view').classList.contains('active');
+
 function onRemoteProfileUpdated(item) {
   if (!item || !item.id) return;
   // The server already excludes the originating user, so any item we see here
   // belongs to somebody else and should appear in our deck.
-  const existing = itemsById.get(item.id);
+
+  // Patch deck-side caches.
   itemsById.set(item.id, item);
-  if (existing) {
-    const idx = items.findIndex(it => it.id === item.id);
-    if (idx >= 0) items[idx] = item;
-  } else {
-    items.push(item);
+  const dIdx = items.findIndex(it => it.id === item.id);
+  if (dIdx >= 0) items[dIdx] = item;
+  else           items.push(item);
+
+  // Patch the results-side cache too. The aggregate counts on the row don't
+  // change (a profile edit doesn't move yes/no), but name / avatar / bio can.
+  const rIdx = lastResults.findIndex(r => r.id === item.id);
+  if (rIdx >= 0) {
+    lastResults[rIdx] = {
+      ...lastResults[rIdx],
+      name:        item.name,
+      imageUrl:    item.imageUrl,
+      description: item.description || ''
+    };
   }
-  // Refresh the deck only if no card is currently mid-drag — otherwise we'd
-  // yank the card out from under the user's finger.
-  if (!deckEl.querySelector('.card.dragging')) renderDeck();
-  // If the updated card is open in the detail modal right now, refresh it too.
+
+  // Re-render whichever view the user is looking at right now.
+  if (isResultsVisible()) renderResultsList();
+  else if (!deckEl.querySelector('.card.dragging')) renderDeck();
+
+  // And refresh the detail modal if it's open on this card.
   if (!modal.classList.contains('hidden') && modalCurrentId === item.id) openProfile(item.id);
 }
 
 function onRemoteProfileDeleted(id) {
   if (!id) return;
   itemsById.delete(id);
-  items = items.filter(it => it.id !== id);
+  items       = items.filter(it => it.id !== id);
+  lastResults = lastResults.filter(r => r.id !== id);
   voted.delete(id);
   myChoices.delete(id);
-  if (!deckEl.querySelector('.card.dragging')) renderDeck();
+  if (isResultsVisible()) renderResultsList();
+  else if (!deckEl.querySelector('.card.dragging')) renderDeck();
   if (!modal.classList.contains('hidden') && modalCurrentId === id) closeProfile();
 }
 
