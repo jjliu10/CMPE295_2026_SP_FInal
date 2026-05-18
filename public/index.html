@@ -46,6 +46,9 @@
           <div class="user-chip">
             <img class="user-avatar" id="user-avatar" alt="" src="">
             <span class="user-name" id="user-name">—</span>
+            <button class="user-logout messages-btn" data-action="open-chats" aria-label="Open messages">
+              Messages<span id="unread-badge" class="unread-badge hidden">0</span>
+            </button>
             <button class="user-logout" data-action="edit-profile" aria-label="Edit my profile">Profile</button>
             <button class="user-logout" data-action="logout"        aria-label="Log out">Log out</button>
           </div>
@@ -139,8 +142,43 @@
             <div class="stat"><span class="stat-num" id="profile-no">—</span><span class="stat-label">no votes</span></div>
           </div>
           <div class="modal-your-vote" id="profile-your-vote">You haven't voted yet.</div>
-          <button class="btn primary modal-wave" id="profile-wave-btn">Send a wave 👋</button>
+          <div class="modal-cta-row">
+            <button class="btn primary modal-wave" id="profile-wave-btn">Send a wave 👋</button>
+            <button class="btn ghost  modal-chat" id="profile-chat-btn" hidden>Send message 💬</button>
+          </div>
           <p class="modal-wave-confirm hidden" id="profile-wave-confirm">👋 Wave sent!</p>
+        </div>
+      </div>
+
+      <!-- Chat modal — full transcript with one other user -->
+      <div id="chat-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="chat-title">
+        <div class="modal-backdrop" data-modal-close></div>
+        <div class="modal-sheet chat-sheet">
+          <header class="chat-header">
+            <button class="modal-close" data-modal-close aria-label="Close">×</button>
+            <img class="chat-avatar" id="chat-avatar" alt="">
+            <div class="chat-titles">
+              <h2 id="chat-title" class="chat-title">—</h2>
+              <span id="chat-subtitle" class="chat-subtitle">@—</span>
+            </div>
+          </header>
+          <div id="chat-log" class="chat-log" aria-live="polite"></div>
+          <form id="chat-form" class="chat-form">
+            <input id="chat-input" type="text" maxlength="500" placeholder="Send a message…" autocomplete="off">
+            <button class="btn primary" type="submit">Send</button>
+          </form>
+        </div>
+      </div>
+
+      <!-- Conversation list modal — every thread you've been part of -->
+      <div id="chats-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="chats-title">
+        <div class="modal-backdrop" data-modal-close></div>
+        <div class="modal-sheet">
+          <button class="modal-close" data-modal-close aria-label="Close">×</button>
+          <h2 id="chats-title">Messages</h2>
+          <p class="modal-sub">Tap a conversation to reply.</p>
+          <ul id="chats-list" class="chats-list"></ul>
+          <p id="chats-empty" class="chats-empty hidden">No conversations yet — wave at someone in the results view to start one.</p>
         </div>
       </div>
     </div>

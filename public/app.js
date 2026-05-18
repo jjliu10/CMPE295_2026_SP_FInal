@@ -84,6 +84,8 @@ function handleWSEvent(event, payload) {
     case 'profile:updated': onRemoteProfileUpdated(payload.item); break;
     case 'profile:deleted': onRemoteProfileDeleted(payload.id);   break;
     case 'wave':            onIncomingWave(payload);              break;
+    case 'message':         onIncomingMessage(payload);           break;
+    case 'message:read':    onMessageRead(payload);               break;
   }
 }
 let searchQuery = '';
@@ -178,6 +180,11 @@ function clearAuth() {
   items = [];
   lastResults = [];
   myProfileId = null;
+  // Hide and zero out the unread badge so it doesn't leak into the auth view.
+  if (typeof unreadBadge !== 'undefined' && unreadBadge) {
+    unreadBadge.textContent = '0';
+    unreadBadge.classList.add('hidden');
+  }
 }
 
 document.querySelectorAll('.auth-tab').forEach(t =>
@@ -250,6 +257,7 @@ document.querySelectorAll('[data-action]').forEach(b =>
       case 'go-results':   showView('results'); break;
       case 'logout':       logout();        break;
       case 'edit-profile': openProfileEditor(); break;
+      case 'open-chats':   openChatList(); break;
     }
   })
 );
@@ -286,6 +294,7 @@ async function bootstrapApp() {
     // Open the live channel once we have a valid session — it auto-reconnects
     // on transient failures and is a no-op when already connected.
     connectWS();
+    refreshUnread();
   } catch (e) {
     console.error(e);
     progressEl.textContent = 'Could not load. Try again.';
@@ -533,8 +542,18 @@ const modalYes        = document.getElementById('profile-yes');
 const modalNo         = document.getElementById('profile-no');
 const modalYourVote   = document.getElementById('profile-your-vote');
 const modalWaveBtn    = document.getElementById('profile-wave-btn');
+const modalChatBtn    = document.getElementById('profile-chat-btn');
 const modalWaveOK     = document.getElementById('profile-wave-confirm');
 let modalCurrentId    = null;
+
+// Item ids for user-published profiles are `u<userId>` — pull the numeric id
+// back out so we can open a chat or send a wave to the owner. Seeded items
+// (`p001`-`p100`) have no owner so this returns null.
+function ownerUserIdOf(itemId) {
+  if (typeof itemId !== 'string' || !itemId.startsWith('u')) return null;
+  const n = parseInt(itemId.slice(1), 10);
+  return Number.isInteger(n) ? n : null;
+}
 
 function openProfile(itemId) {
   // The viewer's own profile is intentionally excluded from /api/items (so they
@@ -565,9 +584,12 @@ function openProfile(itemId) {
       ? `Your vote: <span class="pill ${choice}">${choice.toUpperCase()}</span>`
       : `You haven't voted on this one yet.`;
 
-  // Hide the wave affordance on the viewer's own profile — waving at yourself
-  // is nonsense.
+  // Hide the wave + chat affordances on the viewer's own profile (no waving or
+  // chatting with yourself), and the chat affordance on seeded items (no owner
+  // to message).
+  const ownerId = ownerUserIdOf(itemId);
   modalWaveBtn.hidden = isSelf;
+  modalChatBtn.hidden = isSelf || ownerId == null;
   modalWaveOK.classList.add('hidden');
   if (!isSelf) {
     if (wavedSet.has(itemId)) {
@@ -582,6 +604,15 @@ function openProfile(itemId) {
 
   modal.classList.remove('hidden');
 }
+
+document.getElementById('profile-chat-btn').addEventListener('click', () => {
+  const ownerId = ownerUserIdOf(modalCurrentId);
+  if (ownerId == null) return;
+  // Use the profile's display name (e.g. "joseph, 27") as the fallback header
+  // until the GET resolves with the canonical username.
+  const data = itemsById.get(modalCurrentId) || lastResults.find(r => r.id === modalCurrentId);
+  openChat(ownerId, data ? data.name : null);
+});
 
 function closeProfile() {
   modal.classList.add('hidden');
@@ -669,13 +700,17 @@ function onRemoteProfileDeleted(id) {
   if (!modal.classList.contains('hidden') && modalCurrentId === id) closeProfile();
 }
 
-function onIncomingWave({ fromUsername, itemName }) {
-  showToast(`👋 ${fromUsername} waved at ${itemName ? `your card "${itemName}"` : 'you'}!`);
+function onIncomingWave({ fromUserId, fromUsername, itemName }) {
+  showToast(
+    `👋 ${fromUsername} waved at ${itemName ? `your card "${itemName}"` : 'you'}! Tap to chat back.`,
+    { onTap: () => openChat(fromUserId, fromUsername) }
+  );
 }
 
 // Stacking toast container (created on first use so it can't fight the auth view).
 let toastStack = null;
-function showToast(message, ttlMs = 5000) {
+function showToast(message, opts = {}) {
+  const { ttlMs = 5000, onTap = null } = opts;
   if (!toastStack) {
     toastStack = document.createElement('div');
     toastStack.className = 'toast-stack';
@@ -684,6 +719,14 @@ function showToast(message, ttlMs = 5000) {
   const el = document.createElement('div');
   el.className = 'toast';
   el.textContent = message;
+  if (onTap) {
+    el.classList.add('tappable');
+    el.addEventListener('click', () => {
+      onTap();
+      el.classList.remove('show');
+      el.addEventListener('transitionend', () => el.remove(), { once: true });
+    });
+  }
   toastStack.appendChild(el);
   // Trigger the slide-in transition on the next frame.
   requestAnimationFrame(() => el.classList.add('show'));
@@ -692,6 +735,219 @@ function showToast(message, ttlMs = 5000) {
     el.addEventListener('transitionend', () => el.remove(), { once: true });
   }, ttlMs);
 }
+
+// --- Chat ------------------------------------------------------------------
+// In-memory cache of message rows for the currently-open conversation so
+// incoming WS frames can be appended without a refetch.
+const chatModal    = document.getElementById('chat-modal');
+const chatLog      = document.getElementById('chat-log');
+const chatForm     = document.getElementById('chat-form');
+const chatInput    = document.getElementById('chat-input');
+const chatTitle    = document.getElementById('chat-title');
+const chatSubtitle = document.getElementById('chat-subtitle');
+const chatAvatar   = document.getElementById('chat-avatar');
+const chatsModal   = document.getElementById('chats-modal');
+const chatsList    = document.getElementById('chats-list');
+const chatsEmpty   = document.getElementById('chats-empty');
+const unreadBadge  = document.getElementById('unread-badge');
+
+let chatPartnerId   = null;
+let chatPartnerName = null;
+let totalUnread     = 0;
+
+function setUnreadBadge(n) {
+  totalUnread = Math.max(0, n | 0);
+  unreadBadge.textContent = totalUnread > 99 ? '99+' : String(totalUnread);
+  unreadBadge.classList.toggle('hidden', totalUnread === 0);
+}
+
+async function refreshUnread() {
+  if (!token) return;
+  try {
+    const r = await api('GET', '/api/chats-unread');
+    setUnreadBadge(r.n || 0);
+  } catch (e) { if (e.message !== 'session expired') console.error(e); }
+}
+
+function fmtTime(ts) {
+  if (!ts) return '';
+  const d   = new Date(ts);
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  return sameDay
+    ? d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+    : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+function renderChatLog(messages) {
+  chatLog.innerHTML = '';
+  if (messages.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'chat-empty';
+    empty.textContent = 'Say hi 👋 — your first message starts the conversation.';
+    chatLog.appendChild(empty);
+    return;
+  }
+  // Lightweight time-divider: insert a centered timestamp every time the gap
+  // between adjacent messages exceeds 30 minutes.
+  let lastTs = 0;
+  for (const m of messages) {
+    if (m.createdAt - lastTs > 30 * 60 * 1000) {
+      const t = document.createElement('div');
+      t.className = 'chat-time';
+      t.textContent = fmtTime(m.createdAt);
+      chatLog.appendChild(t);
+    }
+    const b = document.createElement('div');
+    b.className = 'chat-bubble ' + (m.fromUserId === chatPartnerId ? 'theirs' : 'mine');
+    b.textContent = m.body;
+    chatLog.appendChild(b);
+    lastTs = m.createdAt;
+  }
+  // Scroll to the latest message; rAF so layout has measured the new nodes.
+  requestAnimationFrame(() => { chatLog.scrollTop = chatLog.scrollHeight; });
+}
+
+async function openChat(otherUserId, fallbackName) {
+  if (!Number.isInteger(otherUserId)) return;
+  chatPartnerId   = otherUserId;
+  chatPartnerName = fallbackName || '';
+
+  // Close the profile detail modal if it's stealing focus.
+  if (!modal.classList.contains('hidden')) closeProfile();
+  if (!chatsModal.classList.contains('hidden')) chatsModal.classList.add('hidden');
+
+  // Optimistic header while we wait for the transcript.
+  chatTitle.textContent    = fallbackName || `User #${otherUserId}`;
+  chatSubtitle.textContent = fallbackName ? `@${fallbackName}` : '';
+  chatAvatar.src           = '';
+  chatLog.innerHTML        = '<div class="chat-empty">Loading…</div>';
+  chatModal.classList.remove('hidden');
+  chatInput.focus();
+
+  try {
+    const r = await api('GET', `/api/chats/${otherUserId}`);
+    chatPartnerName = r.otherUser.username;
+    chatTitle.textContent    = r.otherUser.name || r.otherUser.username;
+    chatSubtitle.textContent = `@${r.otherUser.username}`;
+    if (r.otherUser.imageUrl) chatAvatar.src = r.otherUser.imageUrl;
+    renderChatLog(r.messages || []);
+    // Server already marked these as read; reconcile the topbar badge.
+    refreshUnread();
+  } catch (err) {
+    if (err.message !== 'session expired') {
+      chatLog.innerHTML = `<div class="chat-empty">Couldn't load this conversation — ${err.message}</div>`;
+    }
+  }
+}
+
+chatForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const body = chatInput.value.trim();
+  if (!body || !chatPartnerId) return;
+  chatInput.value = '';
+  try {
+    // Don't manually append — the server echoes our own message back over WS
+    // so the sender's other tabs (and this one) stay in sync via one code path.
+    await api('POST', `/api/chats/${chatPartnerId}`, { body });
+  } catch (err) {
+    if (err.message !== 'session expired') {
+      chatInput.value = body;
+      showToast(`Couldn't send: ${err.message}`);
+    }
+  }
+});
+
+chatInput.addEventListener('keydown', (e) => {
+  // Cmd/Ctrl+Enter submits, plain Enter already submits via the form.
+  if (e.key === 'Enter' && !e.shiftKey) chatForm.requestSubmit();
+});
+
+chatModal.addEventListener('click', (e) => {
+  if (e.target.dataset.modalClose !== undefined) {
+    chatModal.classList.add('hidden');
+    chatPartnerId = null;
+  }
+});
+
+function onIncomingMessage(message) {
+  // Only update the open conversation if this message belongs to it.
+  const involvesOpenChat = chatPartnerId != null &&
+    (message.fromUserId === chatPartnerId || message.toUserId === chatPartnerId) &&
+    !chatModal.classList.contains('hidden');
+
+  if (involvesOpenChat) {
+    // Append a bubble without rebuilding the whole list.
+    const b = document.createElement('div');
+    b.className = 'chat-bubble ' + (message.fromUserId === chatPartnerId ? 'theirs' : 'mine');
+    b.textContent = message.body;
+    // Empty-state placeholder?
+    const empty = chatLog.querySelector('.chat-empty');
+    if (empty) empty.remove();
+    chatLog.appendChild(b);
+    requestAnimationFrame(() => { chatLog.scrollTop = chatLog.scrollHeight; });
+    // Receiving a message in the open chat marks it read immediately — let
+    // the server know with a no-op fetch that flips read_at.
+    if (message.fromUserId === chatPartnerId) {
+      api('GET', `/api/chats/${chatPartnerId}`).catch(() => {});
+    }
+    return;
+  }
+
+  // Otherwise it's an unread message — toast + badge bump. Self-echoed messages
+  // (sender's other tabs) don't bump the badge.
+  if (message.fromUserId !== chatPartnerId && message.fromUsername) {
+    setUnreadBadge(totalUnread + 1);
+    showToast(
+      `💬 ${message.fromUsername}: ${message.body.length > 80 ? message.body.slice(0, 80) + '…' : message.body}`,
+      { onTap: () => openChat(message.fromUserId, message.fromUsername) }
+    );
+  }
+}
+
+function onMessageRead({ byUserId }) {
+  // The other party caught up. Nothing visual to do today, but a hook is
+  // here in case we add ticks/read receipts later.
+  void byUserId;
+}
+
+// --- Conversation list -----------------------------------------------------
+async function openChatList() {
+  chatsList.innerHTML = '';
+  chatsEmpty.classList.add('hidden');
+  chatsModal.classList.remove('hidden');
+  try {
+    const r = await api('GET', '/api/chats');
+    const rows = r.conversations || [];
+    if (rows.length === 0) { chatsEmpty.classList.remove('hidden'); return; }
+    for (const c of rows) {
+      const li = document.createElement('li');
+      li.dataset.userId = c.otherUserId;
+      li.innerHTML = `
+        <img alt="" src="${escapeHtml(c.otherImageUrl || '')}">
+        <div class="chat-row-body">
+          <div class="chat-row-top">
+            <span class="chat-row-name">${escapeHtml(c.otherName || c.otherUsername)}</span>
+            <span class="chat-row-time">${escapeHtml(fmtTime(c.lastAt))}</span>
+          </div>
+          <div class="chat-row-preview ${c.unread > 0 ? 'unread' : ''}">${escapeHtml(c.lastBody || '')}</div>
+        </div>
+        ${c.unread > 0 ? `<span class="chat-row-badge">${c.unread}</span>` : ''}
+      `;
+      li.addEventListener('click', () => openChat(c.otherUserId, c.otherUsername));
+      chatsList.appendChild(li);
+    }
+  } catch (err) {
+    if (err.message !== 'session expired') {
+      chatsEmpty.textContent = `Couldn't load conversations — ${err.message}`;
+      chatsEmpty.classList.remove('hidden');
+    }
+  }
+}
+
+chatsModal.addEventListener('click', (e) => {
+  if (e.target.dataset.modalClose !== undefined) chatsModal.classList.add('hidden');
+});
 
 // --- Profile editor (the user's own card) ---------------------------------
 const editModal     = document.getElementById('profile-edit-modal');

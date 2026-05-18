@@ -58,7 +58,11 @@ Open <http://localhost:3000> in a mobile-sized window (Chrome devtools → iPhon
 | POST   | `/api/profile`          | Bearer | Create or update the user's own profile (`u<userId>`)           |
 | DELETE | `/api/profile`          | Bearer | Remove the user's profile (cascades to votes on it)             |
 | POST   | `/api/wave`             | Bearer | `{ itemId }` — send a wave to that profile's owner over WS      |
-| WS     | `/ws?token=…`           | Bearer | Live channel — emits `profile:updated`, `profile:deleted`, `wave` |
+| GET    | `/api/chats`            | Bearer | Conversation list — one row per partner with last-message preview and unread count |
+| GET    | `/api/chats/:userId`    | Bearer | Full transcript with that user; flips their messages to read    |
+| POST   | `/api/chats/:userId`    | Bearer | `{ body }` — send a message; live-delivered over WS             |
+| GET    | `/api/chats-unread`     | Bearer | `{ n }` — total unread messages, used by the topbar badge       |
+| WS     | `/ws?token=…`           | Bearer | Live channel — emits `profile:updated`, `profile:deleted`, `wave`, `message`, `message:read` |
 
 ## Item data and image source
 
@@ -88,7 +92,8 @@ Open <http://localhost:3000> in a mobile-sized window (Chrome devtools → iPhon
 - [x] "My Matches" view (yes votes whose global yes-rate ≥ 60%)
 - [x] **Admin / seed script** — `npm run seed` re-seeds the 100 base profiles, and additionally reads `data/extra-items.json` if present so new items can be added with **zero code changes**. Format: `[{ "id": "x001", "name": "Mystery Box, ??", "description": "...", "imageUrl": "https://api.dicebear.com/…" }]`. Re-running the seed is idempotent (UPSERT by id).
 - [x] **Basic analytics** — `/api/stats` returns total swipes, total login sessions, total users, total items, and `avgDecisionMs` (mean time between a card landing on top of the deck and the user committing yes/no). All five values render on the Results header.
-- [x] **Live results & notifications** — websocket layer at `ws://host/ws?token=…`, authenticated via the same Bearer token used for HTTP. The server broadcasts `profile:updated` / `profile:deleted` to every other connected client whenever someone publishes or removes their profile, so the deck refreshes in real time without a page reload. Waves are routed point-to-point (`POST /api/wave` → `sendToUser(item.createdBy)`) and the recipient sees a slide-in toast. Aggregate counts on the Results view still poll every 30 seconds as a backstop so users with a flaky network still see fresh numbers.
+- [x] **Live results & notifications** — websocket layer at `ws://host/ws?token=…`, authenticated via the same Bearer token used for HTTP. The server broadcasts `profile:updated` / `profile:deleted` to every other connected client whenever someone publishes or removes their profile, so both the deck *and* the open Results list refresh in real time without a page reload. Waves are routed point-to-point (`POST /api/wave` → `sendToUser(item.createdBy)`) and the recipient sees a tappable slide-in toast. Aggregate counts on the Results view still poll every 30 seconds as a backstop so users with a flaky network still see fresh numbers.
+- [x] **One-to-one chat** — every wave is the start of a conversation. The recipient can tap the toast to open a chat sheet with the sender, and any user can tap the new "Send message 💬" button in a profile's detail modal to start a thread with that profile's owner. Messages persist in a `messages` table (`id`, `from_user_id`, `to_user_id`, `body`, `created_at`, `read_at`) and are live-delivered over the same WS channel (`message` event); read receipts also propagate (`message:read`) so the sender's badge clears when the other party opens the thread. The topbar has a "Messages" button with a global unread badge, opening a conversation-list sheet with previews and per-thread unread counters.
 
 ## Technical requirements (Section 5) — where each one is met
 

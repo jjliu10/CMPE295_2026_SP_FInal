@@ -15,6 +15,7 @@ app.use(express.json({ limit: '8kb' }));
 const q = {
   insertUser:     db.prepare('INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)'),
   findUserByName: db.prepare('SELECT id, username, password_hash FROM users WHERE username = ?'),
+  findUserById:   db.prepare('SELECT id, username FROM users WHERE id = ?'),
 
   insertSession:  db.prepare('INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)'),
   findSession:    db.prepare(`
@@ -82,6 +83,58 @@ const q = {
       (SELECT COUNT(*) FROM sessions) AS totalSessions,
       (SELECT COUNT(*) FROM items)    AS totalItems,
       (SELECT AVG(decision_ms) FROM votes WHERE decision_ms IS NOT NULL) AS avgDecisionMs
+  `),
+
+  // --- Chat ---------------------------------------------------------------
+  insertMessage:   db.prepare(`
+    INSERT INTO messages (from_user_id, to_user_id, body, created_at)
+    VALUES (?, ?, ?, ?)
+  `),
+  messageById:     db.prepare(`
+    SELECT id, from_user_id AS fromUserId, to_user_id AS toUserId,
+           body, created_at AS createdAt, read_at AS readAt
+    FROM messages WHERE id = ?
+  `),
+  conversation:    db.prepare(`
+    SELECT id, from_user_id AS fromUserId, to_user_id AS toUserId,
+           body, created_at AS createdAt, read_at AS readAt
+    FROM messages
+    WHERE (from_user_id = ? AND to_user_id = ?)
+       OR (from_user_id = ? AND to_user_id = ?)
+    ORDER BY id ASC
+    LIMIT ?
+  `),
+  markRead:        db.prepare(`
+    UPDATE messages SET read_at = ?
+    WHERE to_user_id = ? AND from_user_id = ? AND read_at IS NULL
+  `),
+  // Conversation list for the logged-in user: one row per other-party, with
+  // the latest message preview, last activity timestamp, and unread count.
+  conversationList: db.prepare(`
+    WITH partners AS (
+      SELECT CASE WHEN from_user_id = @me THEN to_user_id ELSE from_user_id END AS other_id,
+             MAX(id) AS last_id
+      FROM messages
+      WHERE from_user_id = @me OR to_user_id = @me
+      GROUP BY other_id
+    )
+    SELECT
+      p.other_id                                                              AS otherUserId,
+      u.username                                                              AS otherUsername,
+      m.body                                                                  AS lastBody,
+      m.from_user_id                                                          AS lastFromUserId,
+      m.created_at                                                            AS lastAt,
+      (SELECT COUNT(*) FROM messages
+        WHERE to_user_id = @me AND from_user_id = p.other_id AND read_at IS NULL) AS unread,
+      (SELECT image_url FROM items WHERE created_by = p.other_id LIMIT 1)     AS otherImageUrl,
+      (SELECT name      FROM items WHERE created_by = p.other_id LIMIT 1)     AS otherName
+    FROM partners p
+    JOIN users u    ON u.id = p.other_id
+    JOIN messages m ON m.id = p.last_id
+    ORDER BY m.created_at DESC
+  `),
+  unreadCount:      db.prepare(`
+    SELECT COUNT(*) AS n FROM messages WHERE to_user_id = ? AND read_at IS NULL
   `)
 };
 
@@ -229,11 +282,77 @@ app.post('/api/wave', authRequired, (req, res) => {
   if (item.createdBy === req.user.id) return res.status(400).json({ error: "you can't wave at yourself" });
 
   const delivered = sendToUser(item.createdBy, 'wave', {
+    fromUserId:   req.user.id,
     fromUsername: req.user.username,
     itemId,
-    itemName: item.name
+    itemName:     item.name
   });
   res.json({ ok: true, delivered });
+});
+
+// --- Chat -----------------------------------------------------------------
+const MAX_MESSAGE_LEN = 500;
+
+// List of conversations the logged-in user has had with anyone, newest first.
+app.get('/api/chats', authRequired, (req, res) => {
+  const rows = q.conversationList.all({ me: req.user.id });
+  res.json({ conversations: rows });
+});
+
+// Fetch the full transcript between the logged-in user and `:otherUserId`.
+// Side effect: every message in that conversation that's addressed to the
+// caller and still unread is flipped to read in the same request.
+app.get('/api/chats/:otherUserId', authRequired, (req, res) => {
+  const other = parseInt(req.params.otherUserId, 10);
+  if (!Number.isInteger(other) || other === req.user.id) return res.status(400).json({ error: 'bad otherUserId' });
+  const otherUser = q.findUserById.get(other);
+  if (!otherUser) return res.status(404).json({ error: 'unknown user' });
+
+  const messages = q.conversation.all(req.user.id, other, other, req.user.id, 500);
+  q.markRead.run(Date.now(), req.user.id, other);
+  // Tell the other party (if connected) that we read their messages, so they
+  // can update their unread badge live.
+  sendToUser(other, 'message:read', { byUserId: req.user.id });
+
+  // Bundle the partner's profile info so the client can render the chat header
+  // without a separate lookup.
+  const profile = q.getProfile.get(other);
+  res.json({
+    otherUser: {
+      id:       other,
+      username: otherUser.username,
+      name:     profile ? profile.name     : otherUser.username,
+      imageUrl: profile ? profile.imageUrl : null
+    },
+    messages
+  });
+});
+
+// Send a message. Body is { body: "hi there" }. The recipient sees it live
+// over their websocket as a 'message' event.
+app.post('/api/chats/:otherUserId', authRequired, (req, res) => {
+  const other = parseInt(req.params.otherUserId, 10);
+  if (!Number.isInteger(other) || other === req.user.id) return res.status(400).json({ error: 'bad otherUserId' });
+  if (!q.findUserById.get(other))                        return res.status(404).json({ error: 'unknown user' });
+
+  const body = typeof req.body?.body === 'string' ? req.body.body.trim() : '';
+  if (body.length < 1)                       return res.status(400).json({ error: 'message body required' });
+  if (body.length > MAX_MESSAGE_LEN)         return res.status(400).json({ error: `message too long (max ${MAX_MESSAGE_LEN} chars)` });
+
+  const info    = q.insertMessage.run(req.user.id, other, body, Date.now());
+  const message = q.messageById.get(info.lastInsertRowid);
+
+  // Live-deliver. The sender's other tabs also get the message so the chat
+  // window stays in sync across devices.
+  const wirePayload = { ...message, fromUsername: req.user.username };
+  sendToUser(other,        'message', wirePayload);
+  sendToUser(req.user.id,  'message', wirePayload);
+  res.json({ ok: true, message: wirePayload });
+});
+
+// Lightweight count used by the topbar unread badge.
+app.get('/api/chats-unread', authRequired, (req, res) => {
+  res.json(q.unreadCount.get(req.user.id));
 });
 
 app.post('/api/undo', authRequired, (req, res) => {

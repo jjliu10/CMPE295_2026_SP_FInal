@@ -51,6 +51,21 @@ db.exec(`
     FOREIGN KEY (item_id) REFERENCES items(id) ON DELETE CASCADE
   );
   CREATE INDEX IF NOT EXISTS idx_votes_item ON votes(item_id);
+
+  CREATE TABLE IF NOT EXISTS messages (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_user_id INTEGER NOT NULL,
+    to_user_id   INTEGER NOT NULL,
+    body         TEXT    NOT NULL,
+    created_at   INTEGER NOT NULL,
+    read_at      INTEGER,
+    FOREIGN KEY (from_user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (to_user_id)   REFERENCES users(id) ON DELETE CASCADE
+  );
+  -- Composite index serves the "conversation between A and B in time order" query
+  -- as well as the "unread for me from any sender" query.
+  CREATE INDEX IF NOT EXISTS idx_messages_pair    ON messages(from_user_id, to_user_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_messages_to_read ON messages(to_user_id, read_at);
 `);
 
 // In-place migration for DBs created before items.created_by existed.
