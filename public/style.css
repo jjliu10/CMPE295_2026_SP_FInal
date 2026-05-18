@@ -496,3 +496,31 @@ main { flex: 1; min-height: 0; position: relative; }
 }
 .profile-edit-actions .btn.primary { flex: 1; }
 .profile-edit-actions .btn.ghost   { flex: 0 0 auto; }
+
+/* --- Live notification toasts ------------------------------------------- */
+.toast-stack {
+  position: fixed;
+  top: env(safe-area-inset-top, 12px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(360px, calc(100vw - 24px));
+  pointer-events: none;
+}
+.toast {
+  background: rgba(20, 16, 28, 0.95);
+  color: #fff;
+  padding: 10px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,0.12);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+  font-size: 14px;
+  line-height: 1.35;
+  opacity: 0;
+  transform: translateY(-12px) scale(0.98);
+  transition: opacity 220ms ease, transform 220ms ease;
+}
+.toast.show { opacity: 1; transform: translateY(0) scale(1); }

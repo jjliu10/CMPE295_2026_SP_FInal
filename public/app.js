@@ -39,7 +39,53 @@ const myChoices = new Map();             // itemId → 'yes' | 'no'
 const wavedSet = new Set();              // itemIds the user has waved at this session
 let lastResults = [];                    // last /api/results rows (for the modal)
 let myProfileId = null;                  // id of the viewer's own published profile (or null)
+let myUserId    = null;                  // numeric user id (used to ignore self-broadcasts)
 let currentSort = 'top';
+
+// --- WebSocket client ------------------------------------------------------
+let ws            = null;
+let wsReconnectMs = 1000;                // back off up to 30s on repeated failures
+let wsReconnectTimer = null;
+
+function connectWS() {
+  if (!token) return;
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  clearTimeout(wsReconnectTimer);
+
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(token)}`);
+
+  ws.addEventListener('open',    () => { wsReconnectMs = 1000; });
+  ws.addEventListener('message', (e) => {
+    try {
+      const { event, payload } = JSON.parse(e.data);
+      handleWSEvent(event, payload);
+    } catch { /* ignore malformed frames */ }
+  });
+  ws.addEventListener('close', () => {
+    ws = null;
+    if (!token) return;            // we logged out, don't reconnect
+    wsReconnectTimer = setTimeout(connectWS, wsReconnectMs);
+    wsReconnectMs = Math.min(wsReconnectMs * 2, 30_000);
+  });
+  ws.addEventListener('error', () => { try { ws.close(); } catch {} });
+}
+
+function disconnectWS() {
+  clearTimeout(wsReconnectTimer);
+  if (ws) {
+    const w = ws; ws = null;
+    try { w.close(); } catch {}
+  }
+}
+
+function handleWSEvent(event, payload) {
+  switch (event) {
+    case 'profile:updated': onRemoteProfileUpdated(payload.item); break;
+    case 'profile:deleted': onRemoteProfileDeleted(payload.id);   break;
+    case 'wave':            onIncomingWave(payload);              break;
+  }
+}
 let searchQuery = '';
 let authMode = 'login';   // 'login' | 'register'
 
@@ -72,6 +118,7 @@ async function api(method, url, body) {
     // Token was rejected — bounce back to the auth screen.
     clearAuth();
     stopPolling();
+    disconnectWS();
     showAuth();
     throw new Error('session expired');
   }
@@ -166,6 +213,7 @@ async function logout() {
   try { await api('POST', '/api/logout'); } catch {}
   clearAuth();
   stopPolling();
+  disconnectWS();
   // Reset the UI to its initial state.
   deckEl.innerHTML = '';
   resultsEl.innerHTML = '';
@@ -235,6 +283,9 @@ async function bootstrapApp() {
     myProfileId = profileRes.profile ? profileRes.profile.id : null;
     setUserAvatar(profileRes.profile);
     renderDeck();
+    // Open the live channel once we have a valid session — it auto-reconnects
+    // on transient failures and is a no-op when already connected.
+    connectWS();
   } catch (e) {
     console.error(e);
     progressEl.textContent = 'Could not load. Try again.';
@@ -550,13 +601,81 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !modal.classList.contains('hidden')) closeProfile();
 });
 
-modalWaveBtn.addEventListener('click', () => {
+modalWaveBtn.addEventListener('click', async () => {
   if (!modalCurrentId || wavedSet.has(modalCurrentId)) return;
-  wavedSet.add(modalCurrentId);
+  // Optimistic UI: update locally before the server confirms, then roll back
+  // if the POST is rejected (e.g. recipient was deleted between renders).
+  const itemId = modalCurrentId;
+  wavedSet.add(itemId);
   modalWaveBtn.disabled    = true;
   modalWaveBtn.textContent = 'Wave sent';
   modalWaveOK.classList.remove('hidden');
+  try {
+    await api('POST', '/api/wave', { itemId });
+  } catch (err) {
+    wavedSet.delete(itemId);
+    if (modalCurrentId === itemId) {
+      modalWaveBtn.disabled    = false;
+      modalWaveBtn.textContent = 'Send a wave 👋';
+      modalWaveOK.classList.add('hidden');
+    }
+    if (err.message !== 'session expired') console.error('wave failed', err);
+  }
 });
+
+// --- Live (WebSocket) event handlers ---------------------------------------
+function onRemoteProfileUpdated(item) {
+  if (!item || !item.id) return;
+  // The server already excludes the originating user, so any item we see here
+  // belongs to somebody else and should appear in our deck.
+  const existing = itemsById.get(item.id);
+  itemsById.set(item.id, item);
+  if (existing) {
+    const idx = items.findIndex(it => it.id === item.id);
+    if (idx >= 0) items[idx] = item;
+  } else {
+    items.push(item);
+  }
+  // Refresh the deck only if no card is currently mid-drag — otherwise we'd
+  // yank the card out from under the user's finger.
+  if (!deckEl.querySelector('.card.dragging')) renderDeck();
+  // If the updated card is open in the detail modal right now, refresh it too.
+  if (!modal.classList.contains('hidden') && modalCurrentId === item.id) openProfile(item.id);
+}
+
+function onRemoteProfileDeleted(id) {
+  if (!id) return;
+  itemsById.delete(id);
+  items = items.filter(it => it.id !== id);
+  voted.delete(id);
+  myChoices.delete(id);
+  if (!deckEl.querySelector('.card.dragging')) renderDeck();
+  if (!modal.classList.contains('hidden') && modalCurrentId === id) closeProfile();
+}
+
+function onIncomingWave({ fromUsername, itemName }) {
+  showToast(`👋 ${fromUsername} waved at ${itemName ? `your card "${itemName}"` : 'you'}!`);
+}
+
+// Stacking toast container (created on first use so it can't fight the auth view).
+let toastStack = null;
+function showToast(message, ttlMs = 5000) {
+  if (!toastStack) {
+    toastStack = document.createElement('div');
+    toastStack.className = 'toast-stack';
+    document.body.appendChild(toastStack);
+  }
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = message;
+  toastStack.appendChild(el);
+  // Trigger the slide-in transition on the next frame.
+  requestAnimationFrame(() => el.classList.add('show'));
+  setTimeout(() => {
+    el.classList.remove('show');
+    el.addEventListener('transitionend', () => el.remove(), { once: true });
+  }, ttlMs);
+}
 
 // --- Profile editor (the user's own card) ---------------------------------
 const editModal     = document.getElementById('profile-edit-modal');

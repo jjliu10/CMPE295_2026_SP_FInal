@@ -57,6 +57,8 @@ Open <http://localhost:3000> in a mobile-sized window (Chrome devtools → iPhon
 | GET    | `/api/profile`          | Bearer | Logged-in user's own profile item, or `null`                    |
 | POST   | `/api/profile`          | Bearer | Create or update the user's own profile (`u<userId>`)           |
 | DELETE | `/api/profile`          | Bearer | Remove the user's profile (cascades to votes on it)             |
+| POST   | `/api/wave`             | Bearer | `{ itemId }` — send a wave to that profile's owner over WS      |
+| WS     | `/ws?token=…`           | Bearer | Live channel — emits `profile:updated`, `profile:deleted`, `wave` |
 
 ## Item data and image source
 
@@ -86,7 +88,7 @@ Open <http://localhost:3000> in a mobile-sized window (Chrome devtools → iPhon
 - [x] "My Matches" view (yes votes whose global yes-rate ≥ 60%)
 - [x] **Admin / seed script** — `npm run seed` re-seeds the 100 base profiles, and additionally reads `data/extra-items.json` if present so new items can be added with **zero code changes**. Format: `[{ "id": "x001", "name": "Mystery Box, ??", "description": "...", "imageUrl": "https://api.dicebear.com/…" }]`. Re-running the seed is idempotent (UPSERT by id).
 - [x] **Basic analytics** — `/api/stats` returns total swipes, total login sessions, total users, total items, and `avgDecisionMs` (mean time between a card landing on top of the deck and the user committing yes/no). All five values render on the Results header.
-- [x] **Live results** — when the user is on the Results tab and the browser tab is visible, `/api/results` and `/api/stats` re-poll every 30s (and immediately on visibilitychange). Scroll position is preserved across refreshes. Skipped websockets for simplicity; this is cheap enough at the demo scale.
+- [x] **Live results & notifications** — websocket layer at `ws://host/ws?token=…`, authenticated via the same Bearer token used for HTTP. The server broadcasts `profile:updated` / `profile:deleted` to every other connected client whenever someone publishes or removes their profile, so the deck refreshes in real time without a page reload. Waves are routed point-to-point (`POST /api/wave` → `sendToUser(item.createdBy)`) and the recipient sees a slide-in toast. Aggregate counts on the Results view still poll every 30 seconds as a backstop so users with a flaky network still see fresh numbers.
 
 ## Technical requirements (Section 5) — where each one is met
 
@@ -132,7 +134,7 @@ Open <http://localhost:3000> in a mobile-sized window (Chrome devtools → iPhon
 ## Known gaps / trade-offs
 
 - Tokens never expire and there is no rate-limiting on `/api/login`. Fine for a local demo; a production deploy would add expiry and a brute-force guard.
-- Live results use 30-second polling, not websockets — cheap and correct at this scale, but a real chat-app-grade feed would push.
+- The websocket layer is in-memory only — restart the server and connected clients reconnect cleanly but any in-flight waves are lost. A production deploy would either persist waves or use a pub/sub bus (Redis, NATS) so multiple Node instances can share the broadcast.
 - Avatars are fetched from the DiceBear CDN. The inline-SVG fallback prevents broken-image icons offline, but you'd want a bundled fixture set for a true air-gapped demo.
 
 ## Project layout

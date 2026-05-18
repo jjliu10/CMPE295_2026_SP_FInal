@@ -1,10 +1,12 @@
 // server/server.js — Express API + static host, backed by SQLite.
 
-const express = require('express');
-const bcrypt  = require('bcryptjs');
-const crypto  = require('crypto');
-const path    = require('path');
-const db      = require('./db');
+const express   = require('express');
+const bcrypt    = require('bcryptjs');
+const crypto    = require('crypto');
+const path      = require('path');
+const http      = require('http');
+const WebSocket = require('ws');
+const db        = require('./db');
 
 const app = express();
 app.use(express.json({ limit: '8kb' }));
@@ -32,6 +34,7 @@ const q = {
   `),
   itemExists:     db.prepare('SELECT 1 AS x FROM items WHERE id = ?'),
   itemOwner:      db.prepare('SELECT created_by FROM items WHERE id = ?'),
+  itemById:       db.prepare('SELECT id, name, description, image_url AS imageUrl, created_by AS createdBy FROM items WHERE id = ?'),
 
   getProfile:     db.prepare(`
     SELECT id, name, description, image_url AS imageUrl
@@ -201,12 +204,36 @@ app.post('/api/profile', authRequired, (req, res) => {
   }
   const id = `u${req.user.id}`;
   q.upsertProfile.run(id, trimmedName, trimmedDesc, imageUrl, req.user.id);
-  res.json({ ok: true, profile: q.getProfile.get(req.user.id) });
+  const profile = q.getProfile.get(req.user.id);
+  // Live-broadcast so every OTHER client refreshes their deck without a reload.
+  // The owner is excluded because their own POST response already updated them.
+  broadcast('profile:updated', { item: { ...profile, createdBy: req.user.id } }, req.user.id);
+  res.json({ ok: true, profile });
 });
 
 app.delete('/api/profile', authRequired, (req, res) => {
-  const info = q.deleteProfile.run(`u${req.user.id}`, req.user.id);
+  const id   = `u${req.user.id}`;
+  const info = q.deleteProfile.run(id, req.user.id);
+  if (info.changes > 0) broadcast('profile:deleted', { id }, req.user.id);
   res.json({ ok: info.changes > 0 });
+});
+
+// Send a wave to the owner of a profile item. Pure ephemeral signal — nothing
+// is persisted; if the recipient isn't connected right now they just miss it.
+app.post('/api/wave', authRequired, (req, res) => {
+  const { itemId } = req.body || {};
+  if (typeof itemId !== 'string') return res.status(400).json({ error: 'itemId required' });
+  const item = q.itemById.get(itemId);
+  if (!item)                       return res.status(404).json({ error: 'unknown itemId' });
+  if (!item.createdBy)             return res.status(400).json({ error: 'this profile has no owner to wave at' });
+  if (item.createdBy === req.user.id) return res.status(400).json({ error: "you can't wave at yourself" });
+
+  const delivered = sendToUser(item.createdBy, 'wave', {
+    fromUsername: req.user.username,
+    itemId,
+    itemName: item.name
+  });
+  res.json({ ok: true, delivered });
 });
 
 app.post('/api/undo', authRequired, (req, res) => {
@@ -269,8 +296,84 @@ app.get('/api/stats', (_req, res) => {
 // --- Static frontend -------------------------------------------------------
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
+// --- WebSocket layer -------------------------------------------------------
+// One in-memory map: userId -> Set<WebSocket>. Multiple sockets per user is
+// fine (e.g. browser + incognito both logged in as the same account).
+const userSockets = new Map();
+const wss = new WebSocket.Server({ noServer: true });
+
+function broadcast(event, payload, exceptUserId) {
+  const data = JSON.stringify({ event, payload });
+  for (const [uid, set] of userSockets) {
+    if (uid === exceptUserId) continue;
+    for (const ws of set) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(data);
+    }
+  }
+}
+
+function sendToUser(userId, event, payload) {
+  const set = userSockets.get(userId);
+  if (!set || set.size === 0) return false;
+  const data = JSON.stringify({ event, payload });
+  let delivered = 0;
+  for (const ws of set) {
+    if (ws.readyState === WebSocket.OPEN) { ws.send(data); delivered++; }
+  }
+  return delivered > 0;
+}
+
+wss.on('connection', (ws) => {
+  const uid = ws._userId;
+  if (!userSockets.has(uid)) userSockets.set(uid, new Set());
+  userSockets.get(uid).add(ws);
+
+  // Cheap heartbeat — drop sockets that stopped responding to ping after 60s.
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
+
+  ws.on('close', () => {
+    const set = userSockets.get(uid);
+    if (set) {
+      set.delete(ws);
+      if (set.size === 0) userSockets.delete(uid);
+    }
+  });
+});
+
+setInterval(() => {
+  for (const set of userSockets.values()) {
+    for (const ws of set) {
+      if (ws.isAlive === false) { ws.terminate(); continue; }
+      ws.isAlive = false;
+      try { ws.ping(); } catch {}
+    }
+  }
+}, 30_000).unref();
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+const server = http.createServer(app);
+
+// Token-authenticated WS upgrade. Token rides as a query param because
+// browsers can't set custom headers on the WebSocket constructor.
+server.on('upgrade', (req, socket, head) => {
+  if (!req.url.startsWith('/ws')) { socket.destroy(); return; }
+  const url     = new URL(req.url, 'http://localhost');
+  const token   = url.searchParams.get('token');
+  const session = token ? q.findSession.get(token) : null;
+  if (!session) {
+    socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    ws._userId   = session.user_id;
+    ws._username = session.username;
+    wss.emit('connection', ws, req);
+  });
+});
+
+server.listen(PORT, () => {
   const s = q.stats.get();
   if (s.totalItems === 0) console.warn('No items in DB — run `npm run seed`.');
   console.log(`SwipeMatch running at http://localhost:${PORT} — ${s.totalUsers} users, ${s.totalItems} items, ${s.totalVotes} votes.`);
