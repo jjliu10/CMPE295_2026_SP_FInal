@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+  <meta name="theme-color" content="#0f172a">
+  <title>SwipeMatch — Date or Pass?</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><text y='52' font-size='52'>💘</text></svg>">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Auth view (shown until a token is verified) -->
+    <section id="auth-view" class="auth-view" aria-label="Sign in">
+      <div class="auth-card">
+        <h1 class="brand auth-brand">SwipeMatch</h1>
+        <p class="auth-sub">Date or pass — your votes count toward the global feed.</p>
+
+        <div class="auth-tabs" role="tablist">
+          <button class="auth-tab active" data-auth-tab="login"    role="tab">Log in</button>
+          <button class="auth-tab"        data-auth-tab="register" role="tab">Sign up</button>
+        </div>
+
+        <form id="auth-form" autocomplete="on">
+          <label class="field">
+            <span>Username</span>
+            <input id="auth-username" name="username" type="text" autocomplete="username" minlength="3" maxlength="24" required>
+          </label>
+          <label class="field">
+            <span>Password</span>
+            <input id="auth-password" name="password" type="password" autocomplete="current-password" minlength="4" required>
+          </label>
+          <p id="auth-error" class="auth-error" aria-live="polite"></p>
+          <button id="auth-submit" type="submit" class="btn primary">Log in</button>
+        </form>
+
+        <p class="auth-hint">Tip: open an incognito tab to sign in as a second user and watch the aggregate counts move.</p>
+      </div>
+    </section>
+
+    <!-- Main app (shown after auth) -->
+    <div id="main-app" class="hidden">
+      <header class="topbar">
+        <div class="topbar-row">
+          <h1 class="brand">SwipeMatch</h1>
+          <div class="user-chip">
+            <img class="user-avatar" id="user-avatar" alt="" src="">
+            <span class="user-name" id="user-name">—</span>
+            <button class="user-logout" data-action="edit-profile" aria-label="Edit my profile">Profile</button>
+            <button class="user-logout" data-action="logout"        aria-label="Log out">Log out</button>
+          </div>
+        </div>
+        <nav class="tabs" role="tablist">
+          <button class="tab active" data-view="deck"    role="tab">Deck</button>
+          <button class="tab"        data-view="results" role="tab">Results</button>
+        </nav>
+      </header>
+
+      <main>
+        <!-- Deck -->
+        <section id="deck-view" class="view active" aria-label="Voting deck">
+          <div id="progress" class="progress">Loading…</div>
+          <div id="deck" class="deck"></div>
+
+          <div id="empty" class="empty hidden">
+            <h2>You've voted on everything.</h2>
+            <p>See how everyone else voted.</p>
+            <div class="empty-actions">
+              <button class="btn primary" data-action="go-results">See Results</button>
+            </div>
+          </div>
+
+          <div class="actions">
+            <button class="action no"   data-action="vote-no"  aria-label="No">✕</button>
+            <button class="action undo" data-action="undo"     aria-label="Undo last vote">↶</button>
+            <button class="action yes"  data-action="vote-yes" aria-label="Yes">♥</button>
+          </div>
+          <div class="hint">← swipe no &nbsp;·&nbsp; yes swipe → &nbsp;·&nbsp; pull ↓ for results</div>
+        </section>
+
+        <!-- Results -->
+        <section id="results-view" class="view" aria-label="Aggregate results">
+          <div class="results-header">
+            <div class="filters" role="tablist">
+              <button class="chip active" data-sort="top">Most Loved</button>
+              <button class="chip"        data-sort="divisive">Most Divisive</button>
+              <button class="chip"        data-sort="skipped">Least Voted</button>
+              <button class="chip"        data-sort="matches">My Matches</button>
+            </div>
+            <div class="search-bar">
+              <input type="search" id="results-search" placeholder="Search by name…" autocomplete="off" aria-label="Search results by name">
+            </div>
+          </div>
+          <div id="stats" class="stats">—</div>
+          <ol id="results" class="results"></ol>
+        </section>
+      </main>
+
+      <!-- My-profile editor modal -->
+      <div id="profile-edit-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="profile-edit-title">
+        <div class="modal-backdrop" data-modal-close></div>
+        <div class="modal-sheet">
+          <button class="modal-close" data-modal-close aria-label="Close">×</button>
+          <h2 id="profile-edit-title">Your profile</h2>
+          <p class="modal-sub">Add yourself to the deck. Other voters will see this card — you won't see your own.</p>
+
+          <div class="avatar-picker" id="avatar-picker" role="radiogroup" aria-label="Pick an avatar"></div>
+          <button class="btn ghost btn-shuffle" id="avatar-shuffle" type="button">Show more options</button>
+
+          <label class="field">
+            <span>Display name</span>
+            <input id="profile-edit-name" type="text" maxlength="40" placeholder="e.g. Jamie, 27">
+          </label>
+          <label class="field">
+            <span>Bio <small id="profile-edit-desc-count">0/240</small></span>
+            <textarea id="profile-edit-desc" maxlength="240" rows="3" placeholder="A short blurb other voters will see."></textarea>
+          </label>
+
+          <p id="profile-edit-error" class="auth-error" aria-live="polite"></p>
+
+          <div class="profile-edit-actions">
+            <button class="btn primary" id="profile-edit-save"   type="button">Publish to deck</button>
+            <button class="btn ghost"   id="profile-edit-delete" type="button" hidden>Remove</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Profile detail modal (read-only, from results) -->
+      <div id="profile-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="profile-name">
+        <div class="modal-backdrop" data-modal-close></div>
+        <div class="modal-sheet">
+          <button class="modal-close" data-modal-close aria-label="Close">×</button>
+          <div class="modal-avatar"><img id="profile-avatar" alt=""></div>
+          <h2 class="modal-name" id="profile-name">—</h2>
+          <p class="modal-desc" id="profile-desc"></p>
+          <div class="modal-stats">
+            <div class="stat"><span class="stat-num" id="profile-pct">—</span><span class="stat-label">global yes</span></div>
+            <div class="stat"><span class="stat-num" id="profile-yes">—</span><span class="stat-label">yes votes</span></div>
+            <div class="stat"><span class="stat-num" id="profile-no">—</span><span class="stat-label">no votes</span></div>
+          </div>
+          <div class="modal-your-vote" id="profile-your-vote">You haven't voted yet.</div>
+          <button class="btn primary modal-wave" id="profile-wave-btn">Send a wave 👋</button>
+          <p class="modal-wave-confirm hidden" id="profile-wave-confirm">👋 Wave sent!</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
